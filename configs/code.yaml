@@ -1,0 +1,17 @@
+extends: base.yaml
+name: code
+arm: code
+train:
+  kind: hf
+  adapter: taco
+  id: BAAI/TACO
+  path: null
+  split: train[:90%]
+  offset: 0
+validation:
+  kind: hf
+  adapter: taco
+  id: BAAI/TACO
+  path: null
+  split: train[90%:]
+  offset: 0

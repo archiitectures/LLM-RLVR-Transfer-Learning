@@ -1,0 +1,17 @@
+extends: base.yaml
+name: logic
+arm: logic
+train:
+  kind: procedural
+  adapter: logic
+  id: null
+  path: null
+  seed: 1729
+  offset: 0
+validation:
+  kind: procedural
+  adapter: logic
+  id: null
+  path: null
+  seed: 1730
+  offset: 0

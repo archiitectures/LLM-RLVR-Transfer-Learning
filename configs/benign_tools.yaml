@@ -1,0 +1,19 @@
+extends: base.yaml
+name: benign_tools
+arm: benign_tools
+train:
+  kind: procedural
+  adapter: benign_tools
+  id: null
+  path: null
+  families: [transform, debug]
+  seed: 1729
+  offset: 0
+validation:
+  kind: procedural
+  adapter: benign_tools
+  id: null
+  path: null
+  families: [transform, debug]
+  seed: 1730
+  offset: 0

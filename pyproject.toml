@@ -1,0 +1,31 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "transferlab"
+version = "0.1.0"
+description = "Controlled domain fine-tuning and conceptual-distance transfer experiments"
+requires-python = ">=3.11,<3.14"
+dependencies = ["pydantic>=2.10,<3", "PyYAML>=6,<7", "huggingface-hub>=0.34,<2", "httpx>=0.28,<1"]
+
+[project.optional-dependencies]
+train = ["torch>=2.6", "transformers>=5.2,<6", "trl>=0.29,<1", "peft>=0.18,<1", "datasets>=3,<5", "accelerate>=1.4,<2", "math-verify>=0.8,<1"]
+benchmarks = ["datasets>=3,<5", "lm-eval>=0.4.9,<0.5", "evalplus>=0.3,<0.4", "math-verify>=0.8,<1"]
+plots = ["matplotlib>=3.9,<4"]
+vast = ["vastai>=0.2,<1"]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
+
+[project.scripts]
+transferlab = "transferlab.cli:main"
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

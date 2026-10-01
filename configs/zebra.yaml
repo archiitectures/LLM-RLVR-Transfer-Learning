@@ -1,0 +1,8 @@
+extends: base.yaml
+name: crypto-zebra
+evaluation:
+  benchmarks:
+    - name: zebra
+      source: {kind: hf, adapter: zebra, id: allenai/ZebraLogicBench, subset: grid_mode, split: test, count: 32}
+      distance: {crypto: 3, benign_tools: 3, code: 3, math: 2, logic: 1}
+      skills: [deduction, constraint-solving]

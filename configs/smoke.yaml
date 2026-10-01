@@ -1,0 +1,41 @@
+extends: base.yaml
+name: smoke
+arm: math
+model:
+  id: HuggingFaceTB/SmolLM2-135M-Instruct
+  dtype: float32
+recipe:
+  max_steps: 1
+  max_prompt_tokens: 256
+  max_completion_tokens: 32
+  max_context_tokens: 512
+  lora_rank: 4
+  lora_alpha: 8
+  beta: 0.0
+train:
+  kind: procedural
+  adapter: math
+  count: 8
+  id: null
+  path: null
+  seed: 123
+validation:
+  kind: procedural
+  adapter: math
+  count: 4
+  id: null
+  path: null
+  seed: 124
+evaluation:
+  max_new_tokens: 32
+  benchmarks:
+    - name: arithmetic
+      source: {kind: procedural, adapter: math, count: 4, seed: 125}
+      distance: {crypto: 3, benign_tools: 2, code: 2, math: 0, logic: 2}
+      skills: [arithmetic]
+    - name: logic
+      source: {kind: procedural, adapter: logic, count: 4, seed: 126}
+      distance: {crypto: 3, benign_tools: 3, code: 3, math: 2, logic: 0}
+      skills: [deduction]
+study:
+  seeds: [11]

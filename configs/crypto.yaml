@@ -1,0 +1,3 @@
+extends: base.yaml
+name: crypto
+arm: crypto

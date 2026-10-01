@@ -1,0 +1,105 @@
+name: crypto
+arm: crypto
+seed: 11
+model:
+  id: Qwen/Qwen2.5-7B-Instruct
+  dtype: bfloat16
+recipe:
+  learning_rate: 0.00001
+  lora_rank: 32
+  lora_alpha: 64
+  group_size: 4
+  batch_size: 4
+  max_steps: 10000
+  max_prompt_tokens: 4096
+  max_completion_tokens: 2048
+  max_context_tokens: 8192
+  beta: 0.01
+  loss_type: grpo
+  max_tool_calls: 8
+  milestones: [0.25, 0.5, 1.0]
+train:
+  kind: github
+  adapter: random_crypto
+  id: aielte-research/HackSynth-GRPO
+  path: random_crypto/challenges/non_verified_challenges_5000/all_challenges.csv
+  count: 512
+  offset: 0
+  seed: 1729
+validation:
+  kind: github
+  adapter: random_crypto
+  id: aielte-research/HackSynth-GRPO
+  path: random_crypto/challenges/non_verified_challenges_5000/all_challenges.csv
+  count: 64
+  offset: 512
+  seed: 1729
+evaluation:
+  samples: 4
+  temperature: 0.7
+  top_p: 0.95
+  max_new_tokens: 2048
+  seed: 3407
+  benchmarks:
+    - name: crypto-verified
+      source:
+        kind: github
+        adapter: random_crypto
+        id: aielte-research/HackSynth-GRPO
+        path: random_crypto/challenges/verified_challenges_50/all_challenges.csv
+        count: 50
+      distance: {crypto: 0, benign_tools: 1, code: 2, math: 2, logic: 3}
+      skills: [code-reading, arithmetic, tool-use, cryptography]
+    - name: intercode-inline
+      source:
+        kind: github
+        adapter: intercode_inline
+        id: princeton-nlp/intercode
+        path: data/ctf/ic_ctf.json
+        count: 5
+        task_ids: [5, 17, 18, 19, 22]
+      distance: {crypto: 1, benign_tools: 1, code: 2, math: 3, logic: 3}
+      skills: [encoding, tool-use]
+    - name: benign-tools
+      source: {kind: procedural, adapter: benign_tools, count: 64, seed: 4101, families: [transform, debug]}
+      distance: {crypto: 2, benign_tools: 0, code: 1, math: 2, logic: 3}
+      skills: [tool-use, debugging, data-transformation]
+    - name: humaneval-plus
+      source: {kind: evalplus, adapter: humaneval_plus, count: 32, seed: 4102}
+      distance: {crypto: 2, benign_tools: 1, code: 0, math: 3, logic: 3}
+      skills: [code-generation, algorithms]
+    - name: mbpp-plus
+      source: {kind: evalplus, adapter: mbpp_plus, count: 32, seed: 4103}
+      distance: {crypto: 2, benign_tools: 1, code: 0, math: 3, logic: 3}
+      skills: [code-generation, algorithms]
+    - name: math500
+      source: {kind: hf, adapter: math500, id: HuggingFaceH4/MATH-500, split: test, count: 128, seed: 4104}
+      distance: {crypto: 3, benign_tools: 3, code: 2, math: 0, logic: 2}
+      skills: [math, multistep-reasoning]
+    - name: knights-knaves
+      source: {kind: procedural, adapter: logic, count: 64, seed: 4105}
+      distance: {crypto: 3, benign_tools: 3, code: 3, math: 2, logic: 0}
+      skills: [deduction]
+    - name: arc-challenge
+      source: {kind: hf, adapter: arc, id: allenai/ai2_arc, subset: ARC-Challenge, split: test, count: 64, seed: 4106}
+      distance: {crypto: 4, benign_tools: 4, code: 4, math: 3, logic: 3}
+      skills: [science-knowledge]
+sandbox:
+  image: python:3.11-slim
+  timeout_seconds: 10
+  memory_mb: 256
+  output_bytes: 16384
+vast:
+  max_rate: 2.0
+  max_cost: 30
+  max_hours: 12
+  min_vram_gb: 48
+  min_reliability: 0.98
+  disk_gb: 100
+study:
+  total_usd: 1000
+  pilot_usd: 100
+  training_usd: 550
+  evaluation_usd: 250
+  contingency_usd: 100
+  seeds: [11, 22, 33]

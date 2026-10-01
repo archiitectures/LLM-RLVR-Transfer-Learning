@@ -1,0 +1,17 @@
+extends: base.yaml
+name: math
+arm: math
+train:
+  kind: hf
+  adapter: numina
+  id: AI-MO/NuminaMath-TIR
+  path: null
+  split: train[:90%]
+  offset: 0
+validation:
+  kind: hf
+  adapter: numina
+  id: AI-MO/NuminaMath-TIR
+  path: null
+  split: train[90%:]
+  offset: 0

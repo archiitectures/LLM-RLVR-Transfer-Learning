@@ -334,7 +334,7 @@ def _evalplus_tasks(source: DataSource) -> tuple[list[Task], dict]:
 
     from evalplus.data import get_human_eval_plus, get_mbpp_plus
 
-    from .codec import encode, oracle_program
+    from .codec import checker_program, encode, oracle_program
     from .config import SandboxConfig
     from .sandbox import DockerSandbox
 
@@ -353,6 +353,18 @@ def _evalplus_tasks(source: DataSource) -> tuple[list[Task], dict]:
         if result.status != "ok":
             raise RuntimeError(f"EvalPlus oracle failed for {ident}: {result.status}")
         oracle = json.loads(result.stdout.strip().splitlines()[-1])
+        checked = sandbox.execute(
+            checker_program(row, oracle, dataset, row["prompt"] + row["canonical_solution"]),
+            image=sandbox.config.evalplus_image,
+            timeout_seconds=sandbox.config.evalplus_timeout_seconds,
+            memory_mb=sandbox.config.evalplus_memory_mb,
+        )
+        if checked.status != "ok" or json.loads(checked.stdout.strip().splitlines()[-1]).get(
+            "statuses"
+        ) != ["pass", "pass"]:
+            raise RuntimeError(
+                f"Known-correct EvalPlus solution rejected for {ident}; preparation aborted"
+            )
         tasks.append(
             Task(
                 ident,

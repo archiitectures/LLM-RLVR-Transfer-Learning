@@ -93,6 +93,8 @@ class Evaluation(Strict):
 class SandboxConfig(Strict):
     image: str = "python:3.11-slim"
     evalplus_image: str = "transferlab-sandbox:0.1.0"
+    evalplus_timeout_seconds: int = Field(180, ge=130, le=600)
+    evalplus_memory_mb: int = Field(1024, ge=512)
     timeout_seconds: int = Field(10, ge=1, le=120)
     memory_mb: int = Field(256, ge=32)
     output_bytes: int = Field(16384, ge=128, le=1048576)
@@ -109,6 +111,8 @@ class VastConfig(Strict):
     image_digest: str | None = None
     readiness_seconds: int = Field(900, ge=1)
     collection_seconds: int = Field(300, ge=1)
+    collection_timeout_seconds: int = Field(900, ge=1)
+    final_collection_seconds: int = Field(900, ge=1)
     ssh_key: str | None = None
     controller_required: bool = True
     min_cuda_version: float = Field(13.0, ge=11.0)

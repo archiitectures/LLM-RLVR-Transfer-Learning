@@ -32,6 +32,8 @@ OMP_NUM_THREADS=1 uv run --extra train transferlab pilot data/tiny-real \
 
 This uses SmolLM2-135M in FP32 on CPU when CUDA is unavailable. It proves the training/saving/loading path, not useful learning. The offline tensor integration test separately proves a nonzero LoRA update and zero loss gradients on observation tokens using artificial test rewards. Paper pilots must show real within-group reward variation and nonzero gradients.
 
+The native-tool integration test additionally exercises TRL's environment loop, Python tool dispatch, answer submission, reward calculation, and observation masking. Training and evaluation share an explicit Qwen XML tool parser. TRL/Transformers are pinned together; upgrade them only after rerunning this test and the GPU pilot.
+
 ## Prepare the paper suite
 
 Install the training/benchmark extras on the Linux GPU runtime or preparation machine:
@@ -57,6 +59,8 @@ uv run --extra benchmarks transferlab prepare configs/logic.yaml \
 ```
 
 Preparation resolves model/HF/GitHub references to commit SHAs, freezes tasks and official EvalPlus base/augmented inputs, computes typed oracles in Docker, and rejects normalized prompt overlaps across train/validation/evaluation. It never executes upstream generators, challenge setup commands, or reference solutions on the controller. Existing preparations are not overwritten. `--shared-evaluation` reuses exactly the same test snapshot and base-model revision; suites reject differing evaluation hashes.
+
+EvalPlus preparation also checks every selected reference solution using the actual checker. Runtime preflight checks a known-correct function end to end. The checker receives a separate 180-second outer deadline and 1 GB memory limit, allowing its internal candidate timeouts to finish. Checker crashes, outer timeouts, and malformed results abort evaluation; they never become model errors in the reported score.
 
 The Random-Crypto training corpus is published as **not human verified**. Its metadata retains that fact. Inspect labels and pilot learnability before paper runs. The supplied benign arm matches the tool interface and episode limits; its task difficulty is not established as matched to Random-Crypto. Pilot diagnostics and task curation are needed before making a content-specific causal claim.
 
@@ -88,7 +92,7 @@ The pilot-budget command fails if data are fixtures, a GPU pilot is incomplete, 
 
 The $1,000 allocation is $100 pilot, $550 training, $250 evaluation, and $100 contingency. The default suite has three seeds per arm. Hyperparameters and data are frozen before paper runs; use validation outcomes for feasibility/curation, not held-out test scores to select the best checkpoint.
 
-Single runs support `--seed`, `--baseline-only`, and `--resume`. Resume requires identical code, installed environment, resolved config, model, and data. Training resumes from a full Trainer checkpoint including optimizer/RNG state and compute accounting. Completed prediction samples are skipped. A final saved adapter can be evaluated separately:
+Single runs support `--seed`, `--baseline-only`, and `--resume`. Resume requires identical code, installed packages/Python, GPU/driver, resolved config, model, data, and sandbox image IDs; the host kernel may differ on a replacement rental. Training resumes from a checksummed full Trainer checkpoint including optimizer/RNG state and compute accounting. Interrupted or corrupt saves are skipped in favor of the latest verified checkpoint. Two full recovery checkpoints are retained during training; older milestone adapters remain available for evaluation. After the final adapter is saved, optimizer checkpoints are removed. Disk headroom is checked before saving. Completed prediction samples are skipped. A final saved adapter can be evaluated separately:
 
 ```sh
 uv run --extra train --extra benchmarks transferlab evaluate data/study/crypto \
@@ -121,13 +125,28 @@ uv run transferlab vast run configs/crypto.yaml \
 
 Remove `--dry-run` to launch. Swap `pilot` for `suite`, pass `/workspace/data/budget.json`, and choose `--category training` for the paper suite. The entire remote command, including dependency setup, is bounded by the watchdog. If a complete suite cannot fit one rental's runtime cap, run individual arm/seed jobs using the same `run` command; the budget ledger spans launches.
 
-The runner filters price, VRAM, reliability, storage, SSH ports, and on-demand availability; reserves estimated rental/storage/transfer exposure before creating; persists a job label **before** creation; reconciles lost creation responses; streams logs; collects artifacts every five minutes and after failure; and destroys/verifies the instance. Any unverified cleanup retains recovery state, exits nonzero, and blocks new rentals. Worst-case reservations remain charged in the local ledger rather than being released using approximate billing.
+The runner filters price, VRAM, reliability, storage, SSH ports, and on-demand availability; reserves estimated rental/storage/transfer exposure before creating; persists a job label **before** creation; reconciles lost creation responses; and streams logs. An ambiguous creation remains tracked even when the instance is not yet visible. Artifact collection runs in the background every five minutes and retries transient failures without aborting training. Individual collections allow up to 15 minutes, and the rental reserves its final 15 minutes for retrieval (configurable with `collection_timeout_seconds` and `final_collection_seconds`). Successful retrieval is followed by verified destruction.
+
+If final retrieval fails after the job starts, the runner stops the GPU and retains the instance and recovery record. **Storage charges continue while stopped.** Stop/cleanup failures exit nonzero, retain state, and block new rentals. `vast collect` explicitly restarts a stopped instance when necessary, retrieves results under a bounded deadline, and destroys it after success; if retrieval fails it stops the GPU again. `vast cleanup --discard-uncollected` explicitly authorizes deleting the only remaining remote results. Worst-case reservations remain charged in the local ledger rather than being released using approximate billing.
 
 ```sh
 uv run transferlab vast status
 uv run transferlab vast collect configs/crypto.yaml
 uv run transferlab vast cleanup
 ```
+
+To resume collected results on a new rental, pass `--restore` and preserve the remote output layout:
+
+```sh
+uv run transferlab vast run configs/crypto.yaml \
+  --data data/study --output runs/remote-resumed --restore runs/remote-pilot \
+  --category pilot -- \
+  uv run --frozen --extra train --extra benchmarks transferlab pilot \
+  /workspace/data/crypto /workspace/data/benign_tools /workspace/data/code \
+  /workspace/data/math /workspace/data/logic --output /workspace/results --steps 8 --tasks 4 --resume
+```
+
+The restore folder is uploaded to `/workspace/results` before execution. Use the same command/config and matching runtime as the interrupted job. Reusing a local output containing runs without `--restore` is rejected.
 
 Keep the controller online overnight. The remote timeout survives SSH disconnection and stops the process, but cannot stop Vast billing on its own. Provider/network failure during destruction can continue billing; the local budget is a conservative launch guard, not a provider-enforced billing cap. No account key is placed in task or training containers.
 
@@ -138,6 +157,8 @@ Prepared data: `config.json`, `manifest.json`, and checksummed task splits. Runs
 Compute is an **architecture-based estimate**, including generation/reference forwards, padded tokens, attention, LoRA backward work, and estimated checkpoint recomputation. It is not profiler-measured FLOPs. Actual GPU memory, runtime, Trainer token metrics, unique task counts, rollout counts, and milestone overshoot are saved independently. Comparisons reaching a milestone can overshoot by one optimizer step; inspect the residual mismatch before making an equal-compute claim.
 
 Evaluation uses the same per-benchmark prompts, sample seeds, temperature, token-span cap, and tool limits for baseline and trained models. Stable labels `budget-25`, `budget-50`, and `final` permit comparisons across seeds. Reports provide per-benchmark paired task bootstrap intervals and separate seed variability; distance-tier averages weight benchmarks equally, not by question count. The example distance labels are proposed study annotations to review and freeze before paper runs. Conceptual distance is ordinal, and task-family counts—not thousands of correlated questions—limit evidence for a distance effect.
+
+Reports require completed non-pilot runs, all configured study seeds and saved milestone evaluations, checksummed evaluation manifests/predictions, exactly one row per expected task/sample, and compatible model/data/recipe/runtime provenance. Old outputs without these integrity records must be regenerated; they are not silently accepted as paper results. These checks do not establish learning or scientific validity by themselves: complete the intended-model CUDA/Docker pilot before funding the full suite.
 
 ## Sources and licenses
 

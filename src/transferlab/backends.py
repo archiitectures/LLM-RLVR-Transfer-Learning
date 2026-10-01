@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import random
-import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +10,7 @@ from .config import Experiment, require_sha
 from .episodes import SYSTEM, TOOL_SYSTEM, ToolEpisode
 from .io import digest, file_hash
 from .tasks import Task
+from .tool_parsing import parse_tool_response
 
 
 @dataclass
@@ -145,22 +145,15 @@ class HFBackend:
             total_completion += len(ids)
             text = self.tokenizer.decode(ids, skip_special_tokens=True)
             truncated |= len(ids) >= remaining
-            calls = re.findall(r"<tool_call>\s*(.*?)\s*</tool_call>", text, re.S) if episode else []
-            if not calls:
-                break
-            parsed = []
             try:
-                for call in calls:
-                    value = json.loads(call)
-                    if value["name"] not in {"execute_python", "submit_answer"} or not isinstance(
-                        value["arguments"], dict
-                    ):
-                        raise ValueError("Invalid tool")
-                    parsed.append({"type": "function", "function": value})
+                response = parse_tool_response(text) if episode else {}
             except (ValueError, KeyError, TypeError):
                 status = "invalid_tool_call"
                 break
-            messages.append({"role": "assistant", "content": None, "tool_calls": parsed})
+            parsed = response.get("tool_calls", [])
+            if not parsed:
+                break
+            messages.append(response)
             for call in parsed:
                 function = call["function"]
                 try:

@@ -5,7 +5,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .config import Experiment
-from .io import append_jsonl, digest, read_jsonl, write_json
+from .io import append_jsonl, digest, file_hash, read_jsonl, write_json
 from .tasks import Task, verify
 
 
@@ -46,6 +46,24 @@ def evaluate(
             },
         }
     )
+    contract = {
+        "model": config.model.model_dump(),
+        "recipe": config.recipe.model_dump(),
+        "evaluation": config.evaluation.model_dump(),
+        "tasks": {
+            k.removeprefix("eval-"): {t.id: digest(t.to_dict()) for t in v}
+            for k, v in splits.items()
+            if k.startswith("eval-")
+        },
+    }
+    evaluation_manifest = {
+        "signature": signature,
+        "contract": contract,
+        "arm": config.arm,
+        "seed": config.seed,
+        "checkpoint": checkpoint,
+        "fixture": backend.name == "fixture",
+    }
     if any(row.get("signature") != signature for row in existing):
         raise ValueError("Evaluation resume fingerprint mismatch")
     keys = {(r["benchmark"], r["task_id"], r["sample"]) for r in existing}
@@ -113,6 +131,9 @@ def evaluate(
         "fixture": backend.name == "fixture",
         "checkpoint": checkpoint,
         "scores": scores,
+        "predictions_sha256": file_hash(predictions),
+        "manifest_sha256": digest(evaluation_manifest),
     }
+    write_json(output / "manifest.json", evaluation_manifest)
     write_json(output / "metrics.json", result)
     return result

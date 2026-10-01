@@ -6,7 +6,49 @@ import statistics
 from pathlib import Path
 
 from .evaluation import pass_at_k
-from .io import read_jsonl, write_json
+from .io import digest, file_hash, portable_provenance, read_json, read_jsonl, write_json
+
+
+def validated_predictions(path: Path, state: dict) -> tuple[list[dict], dict]:
+    manifest = read_json(path.parent / "manifest.json")
+    metrics = read_json(path.parent / "metrics.json")
+    if metrics.get("predictions_sha256") != file_hash(path) or metrics.get(
+        "manifest_sha256"
+    ) != digest(manifest):
+        raise ValueError(f"Evaluation artifact checksum mismatch: {path}")
+    provenance = state["provenance"]
+    config = provenance["config"]
+    contract = manifest["contract"]
+    for field in ("model", "recipe", "evaluation"):
+        if contract[field] != config[field]:
+            raise ValueError(f"Evaluation {field} differs from run provenance")
+    if contract["tasks"] != provenance["evaluation_tasks"]:
+        raise ValueError("Evaluation tasks differ from frozen run provenance")
+    rows = read_jsonl(path)
+    expected = {
+        (benchmark, task, sample)
+        for benchmark, tasks in contract["tasks"].items()
+        for task in tasks
+        for sample in range(config["evaluation"]["samples"])
+    }
+    keys = [(r["benchmark"], r["task_id"], r["sample"]) for r in rows]
+    if len(keys) != len(set(keys)) or set(keys) != expected:
+        raise ValueError("Missing, duplicate, or unexpected evaluation samples")
+    for row in rows:
+        if any(
+            row[field] != manifest[field]
+            for field in ("signature", "arm", "seed", "checkpoint", "fixture")
+        ):
+            raise ValueError("Mixed evaluation provenance")
+        if (
+            row["arm"] != config["arm"]
+            or row["seed"] != config["seed"]
+            or row["fixture"] != provenance["fixture"]
+        ):
+            raise ValueError("Prediction identity differs from run provenance")
+        if type(row["correct"]) is not bool:
+            raise ValueError("Invalid correctness value")
+    return rows, contract
 
 
 def _task_scores(rows: list[dict], k: int) -> dict[str, float]:
@@ -28,18 +70,73 @@ def report(
     root: Path, destination: Path, *, allow_fixtures: bool = False, plots: bool = False
 ) -> dict:
     records = []
+    contracts = {}
+    expected_seeds = {}
+    suite_contract = None
     # Pair within the same run: no accidental pairing across seeds, models, or eval recipes.
     for baseline_path in sorted(root.rglob("eval/baseline/predictions.jsonl")):
-        baseline = read_jsonl(baseline_path)
+        state = read_json(baseline_path.parents[2] / "run.json")
+        if state["status"] != "completed" or digest(state["provenance"]) != state["fingerprint"]:
+            raise ValueError("Reports require completed runs with intact provenance")
+        if state["provenance"].get("pilot"):
+            raise ValueError("Pilot runs cannot supply paper transfer results")
+        baseline, contract = validated_predictions(baseline_path, state)
+        provenance = portable_provenance(state["provenance"])
+        common = {
+            "model": contract["model"],
+            "recipe": contract["recipe"],
+            "evaluation": {
+                **contract["evaluation"],
+                "benchmarks": [
+                    b for b in contract["evaluation"]["benchmarks"] if b["name"] != "validation"
+                ],
+            },
+            "tasks": {k: v for k, v in contract["tasks"].items() if k != "validation"},
+            "source": provenance["source"],
+            "environment": provenance["environment"],
+            "sandbox_image_ids": provenance["sandbox_image_ids"],
+            "study": provenance["config"]["study"],
+        }
+        if suite_contract is not None and suite_contract != common:
+            raise ValueError("Suite runs have incompatible scientific provenance")
+        suite_contract = common
+        arm = state["provenance"]["config"]["arm"]
+        signature = digest(contract)
+        if arm in contracts and contracts[arm] != signature:
+            raise ValueError("Runs have incompatible model, recipe or evaluation contracts")
+        contracts[arm] = signature
+        expected_seeds[arm] = set(state["provenance"]["config"]["study"]["seeds"])
         if any(r["fixture"] for r in baseline) and not allow_fixtures:
             raise ValueError(
                 "Fixture predictions are not scientific results; pass --allow-fixtures for plumbing reports"
             )
         run_eval = baseline_path.parent.parent
+        training = read_json(run_eval.parent / "train" / "training.json")
+        expected_checkpoints = (
+            {"fixture-final"}
+            if state["provenance"]["fixture"]
+            else {
+                "final",
+                *(
+                    f"budget-{round(float(k) * 100)}"
+                    for k in training["milestones"]
+                    if float(k) < 1
+                ),
+            }
+        )
+        actual_checkpoints = {
+            p.parent.name for p in run_eval.glob("*/predictions.jsonl") if p != baseline_path
+        }
+        if actual_checkpoints != expected_checkpoints:
+            raise ValueError("Missing or unexpected evaluation checkpoints")
         for path in sorted(run_eval.glob("*/predictions.jsonl")):
             if path == baseline_path:
                 continue
-            trained = read_jsonl(path)
+            trained, trained_contract = validated_predictions(path, state)
+            if any(r["checkpoint"] != path.parent.name for r in trained):
+                raise ValueError("Checkpoint label differs from evaluation directory")
+            if trained_contract != contract:
+                raise ValueError("Baseline and trained evaluation contracts differ")
             if any(r["fixture"] for r in trained) and not allow_fixtures:
                 raise ValueError("Mixed fixture/scientific predictions")
             for benchmark in sorted({r["benchmark"] for r in baseline}):
@@ -85,6 +182,8 @@ def report(
     for key, rows in sorted(grouped.items()):
         if len({r["seed"] for r in rows}) != len(rows):
             raise ValueError(f"Repeated seed/run for {key}; select a single suite root")
+        if {r["seed"] for r in rows} != expected_seeds[key[0]]:
+            raise ValueError(f"Incomplete study seeds for {key}")
         sets = [set(r["task_deltas"]) for r in rows]
         if any(s != sets[0] for s in sets):
             raise ValueError("Seeds evaluated on different task manifests")

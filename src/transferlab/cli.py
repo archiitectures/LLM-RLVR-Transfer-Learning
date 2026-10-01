@@ -17,7 +17,7 @@ from .pilot import freeze_budget
 from .report import report
 from .runner import run
 from .sandbox import DockerSandbox, FixtureSandbox
-from .vast import RemoteOps, VastAPI, cleanup, run_remote, select_offers
+from .vast import VastAPI, cleanup, recover_results, run_remote, select_offers
 
 
 def parser() -> argparse.ArgumentParser:
@@ -80,6 +80,11 @@ def parser() -> argparse.ArgumentParser:
             cmd.add_argument("--project", type=Path, default=Path.cwd())
             cmd.add_argument("--data", type=Path, required=True)
             cmd.add_argument("--output", type=Path, required=True)
+            cmd.add_argument(
+                "--restore",
+                type=Path,
+                help="Restore a collected results directory onto the new rental",
+            )
             cmd.add_argument("--state", type=Path, default=Path(".transferlab"))
             cmd.add_argument(
                 "--category",
@@ -92,6 +97,8 @@ def parser() -> argparse.ArgumentParser:
         cmd.add_argument("--state", type=Path, default=Path(".transferlab"))
         if name == "collect":
             cmd.add_argument("config", type=Path)
+        if name == "cleanup":
+            cmd.add_argument("--discard-uncollected", action="store_true")
     return p
 
 
@@ -261,15 +268,9 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 api = VastAPI()
                 if args.vast_command == "cleanup":
-                    result = cleanup(api, args.state)
+                    result = cleanup(api, args.state, discard_uncollected=args.discard_uncollected)
                 elif args.vast_command == "collect":
-                    state = read_json(args.state / "active.json")
-                    instance = api.instance(state["instance_id"])
-                    ops = RemoteOps(load_config(args.config).vast, Path(state["output"]))
-                    if instance is None or not ops.connect(instance):
-                        raise ValueError("Tracked instance is not SSH-ready")
-                    ops.collect()
-                    result = {"collected": True}
+                    result = recover_results(api, load_config(args.config).vast, args.state)
                 else:
                     cfg = load_config(args.config)
                     if args.vast_command == "offers":
@@ -296,6 +297,7 @@ def main(argv: list[str] | None = None) -> int:
                             allocation=getattr(cfg.study, args.category + "_usd"),
                             category=args.category,
                             dry_run=args.dry_run,
+                            restore=args.restore,
                         )
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0

@@ -8,6 +8,7 @@ import shlex
 import subprocess
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -109,6 +110,12 @@ class VastAPI:
 
     def destroy(self, instance_id: int) -> None:
         self._request("DELETE", f"instances/{instance_id}/")
+
+    def stop(self, instance_id: int) -> None:
+        self._request("PUT", f"instances/{instance_id}/", {"state": "stopped"})
+
+    def start(self, instance_id: int) -> None:
+        self._request("PUT", f"instances/{instance_id}/", {"state": "running"})
 
 
 @dataclass
@@ -221,6 +228,49 @@ def verify_destroyed(api, instance_id: int, sleep=time.sleep) -> None:
     )
 
 
+def reconcile_creation(api, label: str, sleep=time.sleep) -> int:
+    for attempt in range(4):
+        try:
+            matches = [r for r in api.instances() if r.get("label") == label]
+            if len(matches) > 1:
+                raise CleanupError("Multiple instances match creation label; reconcile explicitly")
+            if matches:
+                return int(matches[0]["id"])
+        except CleanupError:
+            raise
+        except Exception:
+            pass
+        sleep(min(2**attempt, 8))
+    raise CleanupError(
+        f"Creation outcome unknown for job {label}; recovery state retained. Run vast cleanup later."
+    )
+
+
+def preserve_for_recovery(api, instance_id: int, state: dict, active_path: Path, sleep=time.sleep):
+    state.update(status="collection_failed", needs_recovery=True, collected=False)
+    write_json(active_path, state)
+    for attempt in range(4):
+        try:
+            api.stop(instance_id)
+            instance = api.instance(instance_id)
+            if instance and instance.get("actual_status") == "stopped":
+                state["status"] = "stopped_for_recovery"
+                write_json(active_path, state)
+                raise CleanupError(
+                    "Results not collected; GPU stopped and recovery state retained. Storage billing "
+                    "continues. Run vast collect, or vast cleanup --discard-uncollected."
+                )
+        except CleanupError:
+            raise
+        except Exception:
+            pass
+        sleep(min(2**attempt, 8))
+    raise CleanupError(
+        f"Results not collected and stop unverified for instance {instance_id}; billing may continue. "
+        "Recovery state retained; inspect vast status immediately."
+    )
+
+
 class RemoteOps:
     def __init__(self, config: VastConfig, local_output: Path):
         self.config = config
@@ -304,6 +354,14 @@ class RemoteOps:
             remaining - (time.monotonic() - started),
         )
 
+    def restore(self, source: Path, remaining: float) -> None:
+        self._rsync(
+            str(source.resolve()) + "/",
+            self._ssh()[-1] + ":/workspace/results/",
+            remaining,
+            ["remote.log", "rental.json", "collection-errors.jsonl", ".atomic-*"],
+        )
+
     def execute(self, command: list[str], remaining: float) -> None:
         # Remote GNU timeout enforces the command cap even if the controller disconnects.
         wrapped = (
@@ -318,6 +376,8 @@ class RemoteOps:
         deadline = time.monotonic() + remaining
         next_collect = time.monotonic() + self.config.collection_seconds
         self.output.mkdir(parents=True, exist_ok=True)
+        collector = ThreadPoolExecutor(max_workers=1)
+        collection = None
         try:
             with (
                 (self.output / "remote.log").open("ab") as log,
@@ -334,8 +394,27 @@ class RemoteOps:
                             log.flush()
                             print(block.decode(errors="replace"), end="", flush=True)
                     if time.monotonic() >= next_collect:
-                        self.collect(min(60, max(1, deadline - time.monotonic())))
-                        next_collect = time.monotonic() + self.config.collection_seconds
+                        if collection is None or collection.done():
+                            if collection is not None:
+                                try:
+                                    collection.result()
+                                except Exception as exc:
+                                    append_jsonl(
+                                        self.output / "collection-errors.jsonl",
+                                        {
+                                            "time": timestamp(),
+                                            "error": type(exc).__name__,
+                                            "retrying": True,
+                                        },
+                                    )
+                            collection = collector.submit(
+                                self.collect,
+                                min(
+                                    self.config.collection_timeout_seconds,
+                                    max(1, deadline - time.monotonic()),
+                                ),
+                            )
+                            next_collect = time.monotonic() + self.config.collection_seconds
                 tail = process.stdout.read()
                 log.write(tail)
             if process.returncode:
@@ -349,6 +428,7 @@ class RemoteOps:
                     process.kill()
             process.wait(timeout=5)
             process.stdout.close()
+            collector.shutdown(wait=True)
 
     def collect(self, timeout: float = 120) -> None:
         self.output.mkdir(parents=True, exist_ok=True)
@@ -372,9 +452,18 @@ def run_remote(
     dry_run: bool = False,
     ops=None,
     sleep=time.sleep,
+    restore: Path | None = None,
 ) -> dict:
     if not project.is_dir() or not data.is_dir() or not command:
         raise VastError("Project/data paths must exist and command must be nonempty")
+    if restore is not None and (not restore.is_dir() or not any(restore.rglob("run.json"))):
+        raise VastError("Restore path must contain previously collected experiment runs")
+    if restore is None and output.exists() and any(output.rglob("run.json")):
+        raise VastError(
+            "Output already contains runs; pass --restore explicitly or use a new output"
+        )
+    if config.final_collection_seconds >= config.max_hours * 3600:
+        raise VastError("Final collection reservation must be smaller than the rental runtime")
     offers = select_offers(api.offers(config), config)
     if not offers:
         raise VastError(
@@ -409,6 +498,9 @@ def run_remote(
             "offer": asdict(selected),
             "output": str(output.resolve()),
             "status": "creation_requested",
+            "category": category,
+            "ceiling": ceiling,
+            "allocation": allocation,
         }
         write_json(active_path, state)
         started = time.monotonic()
@@ -416,6 +508,7 @@ def run_remote(
         instance_id = None
         error = None
         collected = False
+        job_started = False
         try:
             instance_id = api.create(selected.id, config, label)
             state.update(instance_id=instance_id, status="provisioning")
@@ -443,38 +536,48 @@ def run_remote(
                 raise TimeoutError("SSH readiness timeout")
             state["status"] = "uploading"
             write_json(active_path, state)
-            operations.upload(project, data, deadline - time.monotonic() - 120)
+            operations.upload(
+                project, data, deadline - time.monotonic() - config.final_collection_seconds
+            )
+            if restore is not None:
+                operations.restore(
+                    restore, deadline - time.monotonic() - config.final_collection_seconds
+                )
             state["status"] = "running"
             write_json(active_path, state)
-            if deadline - time.monotonic() <= 120:
+            if deadline - time.monotonic() <= config.final_collection_seconds:
                 raise TimeoutError("No job time remains after setup and collection reservation")
-            operations.execute(command, deadline - time.monotonic() - 120)
+            job_started = True
+            operations.execute(
+                command, deadline - time.monotonic() - config.final_collection_seconds
+            )
         except BaseException as exc:
             error = exc
         finally:
             if instance_id is None:
                 # A lost creation response must not lead to duplicate rentals or an invisible orphan.
-                try:
-                    matches = [r for r in api.instances() if r.get("label") == label]
-                except Exception as exc:
-                    raise CleanupError(
-                        f"Creation outcome unknown for job {label}; recovery state and spending reservation retained"
-                    ) from exc
-                if len(matches) > 1:
-                    raise CleanupError(
-                        "Multiple instances match creation label; reconcile explicitly"
-                    )
-                if matches:
-                    instance_id = int(matches[0]["id"])
-                    state["instance_id"] = instance_id
-                    write_json(active_path, state)
+                instance_id = reconcile_creation(api, label, sleep)
+                state["instance_id"] = instance_id
+                write_json(active_path, state)
             if instance_id is not None:
-                try:
-                    operations.collect(max(1, min(120, deadline - time.monotonic())))
-                    collected = True
-                except BaseException as exc:
-                    if error is None:
-                        error = exc
+                collection_deadline = min(
+                    deadline, time.monotonic() + config.final_collection_seconds
+                )
+                collection_error = None
+                for attempt in range(3):
+                    try:
+                        operations.collect(max(1, collection_deadline - time.monotonic()))
+                        collected = True
+                        break
+                    except BaseException as exc:
+                        collection_error = exc
+                        if time.monotonic() >= collection_deadline:
+                            break
+                        sleep(min(2**attempt, 4))
+                if job_started and not collected:
+                    preserve_for_recovery(api, instance_id, state, active_path, sleep)
+                if not collected and error is None:
+                    error = collection_error
                 state["status"] = "cleanup"
                 write_json(active_path, state)
                 verify_destroyed(api, instance_id, sleep)
@@ -498,16 +601,72 @@ def run_remote(
         return state
 
 
-def cleanup(api, state_dir: Path, *, sleep=time.sleep) -> dict:
+def recover_results(api, config: VastConfig, state_dir: Path, *, ops=None, sleep=time.sleep):
+    """Explicit bounded recovery: restart if necessary, collect, then destroy."""
+    with state_lock(state_dir):
+        path = state_dir / "active.json"
+        state = read_json(path)
+        ident = state["instance_id"]
+        if ident is None:
+            ident = reconcile_creation(api, state["job"], sleep)
+            state["instance_id"] = ident
+            write_json(path, state)
+        operations = ops or RemoteOps(config, Path(state["output"]))
+        deadline = time.monotonic() + config.final_collection_seconds
+        try:
+            instance = api.instance(ident)
+            if instance is None:
+                raise CleanupError("Tracked instance no longer exists; results cannot be retrieved")
+            if instance.get("actual_status") == "stopped":
+                reserve_budget(
+                    state_dir / "budget.json",
+                    state["job"] + "-recovery-" + uuid.uuid4().hex,
+                    state["offer"]["hourly"] * config.final_collection_seconds / 3600 + 3,
+                    state["ceiling"],
+                    state["category"],
+                    state["allocation"],
+                )
+                api.start(ident)
+            while time.monotonic() < deadline:
+                instance = api.instance(ident)
+                if instance and instance.get("actual_status") == "running":
+                    try:
+                        if operations.connect(instance):
+                            break
+                    except (OSError, subprocess.SubprocessError):
+                        pass
+                sleep(5)
+            else:
+                raise TimeoutError("Recovery SSH readiness deadline expired")
+            operations.collect(max(1, deadline - time.monotonic()))
+        except BaseException:
+            preserve_for_recovery(api, ident, state, path, sleep)
+        state.update(collected=True, needs_recovery=False, status="cleanup")
+        write_json(path, state)
+        verify_destroyed(api, ident, sleep)
+        state["status"] = "destroyed"
+        write_json(Path(state["output"]) / "rental.json", state)
+        append_jsonl(state_dir / "lifecycle.jsonl", state)
+        path.unlink()
+        return state
+
+
+def cleanup(api, state_dir: Path, *, sleep=time.sleep, discard_uncollected=False) -> dict:
     with state_lock(state_dir):
         path = state_dir / "active.json"
         if not path.exists():
             return {"status": "no_tracked_rental"}
         state = read_json(path)
+        if state.get("needs_recovery") and not discard_uncollected:
+            raise CleanupError(
+                "Uncollected results remain; use vast collect or explicit --discard-uncollected"
+            )
         matches = [r for r in api.instances() if r.get("label") == state["job"]]
         ids = {int(r["id"]) for r in matches}
         if state["instance_id"] is not None:
             ids.add(state["instance_id"])
+        if not ids:
+            ids.add(reconcile_creation(api, state["job"], sleep))
         for ident in ids:
             verify_destroyed(api, ident, sleep)
         state["status"] = "destroyed"

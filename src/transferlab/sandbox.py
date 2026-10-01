@@ -19,6 +19,8 @@ class Execution:
 
 
 class FixtureSandbox:
+    fixture = True
+
     def execute(self, code, stdin="", **kwargs):
         return Execution("", "Fixture: code was not executed", "fixture_not_executed", 0.0)
 
@@ -42,8 +44,39 @@ class DockerSandbox:
         result = self.execute("print('sandbox-ready')")
         if result.status != "ok" or result.stdout.strip() != "sandbox-ready":
             raise RuntimeError(f"Sandbox preflight failed: {result.status}: {result.stderr}")
+        if evalplus:
+            from .codec import checker_program, encode
 
-    def execute(self, code: str, stdin: str = "", *, image: str | None = None) -> Execution:
+            problem = {"entry_point": "f", "base_input": [[1]], "plus_input": [[2]], "atol": 0}
+            oracle = encode({"base": [1], "plus": [2], "base_time": [0.01], "plus_time": [0.01]})
+            result = self.execute(
+                checker_program(problem, oracle, "humaneval", "def f(x): return x"),
+                image=self.config.evalplus_image,
+                timeout_seconds=self.config.evalplus_timeout_seconds,
+                memory_mb=self.config.evalplus_memory_mb,
+            )
+            try:
+                valid = result.status == "ok" and json.loads(
+                    result.stdout.strip().splitlines()[-1]
+                )["statuses"] == ["pass", "pass"]
+            except (ValueError, IndexError, KeyError):
+                valid = False
+            if not valid:
+                raise RuntimeError(
+                    f"EvalPlus known-correct sandbox check failed: {result.status}: {result.stderr}"
+                )
+
+    def execute(
+        self,
+        code: str,
+        stdin: str = "",
+        *,
+        image: str | None = None,
+        timeout_seconds: int | None = None,
+        memory_mb: int | None = None,
+    ) -> Execution:
+        timeout_seconds = timeout_seconds or self.config.timeout_seconds
+        memory_mb = memory_mb or self.config.memory_mb
         name = "transferlab-" + uuid.uuid4().hex
         launcher = "import sys,json,io; p=json.load(sys.stdin); sys.stdin=io.StringIO(p['stdin']); exec(compile(p['code'],'candidate.py','exec'),{'__name__':'__main__'})"
         command = [
@@ -62,9 +95,9 @@ class DockerSandbox:
             "--pids-limit",
             "64",
             "--memory",
-            f"{self.config.memory_mb}m",
+            f"{memory_mb}m",
             "--memory-swap",
-            f"{self.config.memory_mb}m",
+            f"{memory_mb}m",
             "--cpus",
             "1",
             "--user",
@@ -104,7 +137,7 @@ class DockerSandbox:
                 selector.register(process.stdout, selectors.EVENT_READ, out)
                 selector.register(process.stderr, selectors.EVENT_READ, err)
                 while selector.get_map():
-                    if time.monotonic() - started >= self.config.timeout_seconds:
+                    if time.monotonic() - started >= timeout_seconds:
                         status = "timeout"
                         break
                     for key, _ in selector.select(timeout=0.1):

@@ -4,6 +4,7 @@ import json
 import time
 from pathlib import Path
 
+from .checkpoints import require_checkpoint_space, retain_checkpoints, seal_checkpoint
 from .config import Experiment, require_sha
 from .episodes import SYSTEM, TOOL_SYSTEM, ToolEpisode
 from .io import append_jsonl, digest, read_json, read_jsonl, write_json
@@ -97,6 +98,10 @@ def train(
     output.mkdir(parents=True, exist_ok=True)
     set_seed(config.seed)
     tokenizer = AutoTokenizer.from_pretrained(config.model.id, revision=config.model.revision)
+    if any(t.tools for t in tasks):
+        from .tool_parsing import configure_tool_tokenizer
+
+        configure_tool_tokenizer(tokenizer)
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token_id = tokenizer.eos_token_id
     model = AutoModelForCausalLM.from_pretrained(
@@ -219,6 +224,7 @@ def train(
     )
     if resume:
         meter.restore(read_json(resume / "compute.json"))
+    require_checkpoint_space(output, meter.trainable)
 
     def forward_hook(module, args, kwargs):
         ids = kwargs.get("input_ids")
@@ -262,12 +268,16 @@ def train(
                 output / "compute.jsonl",
                 {"step": state.global_step, "seconds": time.monotonic() - started, **meter.state()},
             )
+            if control.should_save:
+                require_checkpoint_space(output, meter.trainable)
             return control
 
         def on_save(self, args, state, control, **kwargs):
             checkpoint = output / f"checkpoint-{state.global_step}"
             write_json(checkpoint / "compute.json", meter.state())
             write_json(checkpoint / "milestones.json", milestones)
+            seal_checkpoint(checkpoint)
+            retain_checkpoints(output, milestones)
 
     trainer.add_callback(BudgetCallback())
     try:
@@ -310,6 +320,7 @@ def train(
             },
         }
         write_json(output / "training.json", result)
+        retain_checkpoints(output, milestones, finished=True)
         return result
     finally:
         handle.remove()

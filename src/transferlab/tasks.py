@@ -11,6 +11,10 @@ from fractions import Fraction
 from typing import Any
 
 
+class VerifierInfrastructureError(RuntimeError):
+    """A checker could not run; no scientific correctness result is available."""
+
+
 @dataclass
 class Task:
     id: str
@@ -107,20 +111,35 @@ def verify(task: Task, completion: str, sandbox=None) -> tuple[bool, str]:
 
         if sandbox is None:
             raise RuntimeError("EvalPlus verification requires a sandbox")
+        if getattr(sandbox, "fixture", False):
+            return False, "fixture_not_executed"
         program = checker_program(
             decode(task.metadata["problem"]),
             task.metadata["oracle"],
             task.metadata["dataset"],
             extract_code(answer),
         )
-        result = sandbox.execute(program, image=sandbox.config.evalplus_image)
+        result = sandbox.execute(
+            program,
+            image=sandbox.config.evalplus_image,
+            timeout_seconds=sandbox.config.evalplus_timeout_seconds,
+            memory_mb=sandbox.config.evalplus_memory_mb,
+        )
         if result.status != "ok":
-            return False, result.status
+            raise VerifierInfrastructureError(
+                f"EvalPlus checker failed: {result.status}: {result.stderr}"
+            )
         try:
             statuses = json.loads(result.stdout.strip().splitlines()[-1])["statuses"]
+            if (
+                not isinstance(statuses, list)
+                or len(statuses) != 2
+                or any(s not in {"pass", "fail", "timeout"} for s in statuses)
+            ):
+                raise ValueError("Invalid checker statuses")
             return statuses == ["pass", "pass"], "evalplus:" + ",".join(statuses)
         except (ValueError, IndexError, KeyError, TypeError):
-            return False, "unparseable_evalplus_result"
+            raise VerifierInfrastructureError("Malformed EvalPlus checker result") from None
     if task.verifier == "function_cases":
         if sandbox is None:
             raise RuntimeError("Function verification requires a sandbox")

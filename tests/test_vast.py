@@ -4,8 +4,10 @@ from transferlab.config import VastConfig
 from transferlab.io import read_json
 from transferlab.vast import (
     CleanupError,
+    RemoteOps,
     VastError,
     cleanup,
+    recover_results,
     reserve_budget,
     run_remote,
     select_offers,
@@ -104,6 +106,12 @@ class FakeAPI:
             raise VastError("provider unavailable")
         self.live = None
 
+    def stop(self, ident):
+        self.live["actual_status"] = "stopped"
+
+    def start(self, ident):
+        self.live["actual_status"] = "running"
+
 
 class FakeOps:
     def __init__(self, failure=None):
@@ -131,7 +139,7 @@ class FakeOps:
             raise OSError("download failed")
 
 
-def invoke(tmp_path, api, ops, dry_run=False):
+def invoke(tmp_path, api, ops, dry_run=False, restore=None):
     (tmp_path / "project").mkdir(exist_ok=True)
     (tmp_path / "data").mkdir(exist_ok=True)
     return run_remote(
@@ -148,6 +156,7 @@ def invoke(tmp_path, api, ops, dry_run=False):
         ops=ops,
         dry_run=dry_run,
         sleep=lambda _: None,
+        restore=restore,
     )
 
 
@@ -159,6 +168,19 @@ def test_cleanup_on_every_stage(tmp_path, failure):
             invoke(tmp_path, api, ops)
     else:
         assert invoke(tmp_path, api, ops)["status"] == "destroyed"
+    if failure == "collect":
+        assert not api.destroyed
+        assert api.live["actual_status"] == "stopped"
+        assert read_json(tmp_path / "state/active.json")["needs_recovery"]
+        assert ops.collected == 3
+        with pytest.raises(CleanupError, match="Uncollected"):
+            cleanup(api, tmp_path / "state", sleep=lambda _: None)
+        recovered = recover_results(
+            api, VastConfig(), tmp_path / "state", ops=FakeOps(), sleep=lambda _: None
+        )
+        assert recovered["collected"]
+        assert api.destroyed == [456]
+        return
     assert api.destroyed == [456]
     assert ops.collected == 1
     assert not (tmp_path / "state/active.json").exists()
@@ -189,3 +211,92 @@ def test_creation_response_loss_reconciles_by_label(tmp_path):
         invoke(tmp_path, api, FakeOps())
     assert api.destroyed == [456]
     assert not (tmp_path / "state/active.json").exists()
+
+
+def test_creation_response_loss_and_delayed_visibility_retains_record(tmp_path):
+    class HiddenAPI(FakeAPI):
+        visible = False
+
+        def instances(self):
+            return super().instances() if self.visible else []
+
+    api = HiddenAPI(ambiguous=True)
+    with pytest.raises(CleanupError, match="outcome unknown"):
+        invoke(tmp_path, api, FakeOps())
+    assert api.live is not None
+    assert (tmp_path / "state/active.json").exists()
+    with pytest.raises(CleanupError):
+        cleanup(api, tmp_path / "state", sleep=lambda _: None)
+    assert (tmp_path / "state/active.json").exists()
+    api.visible = True
+    cleanup(api, tmp_path / "state", sleep=lambda _: None)
+    assert api.destroyed == [456]
+
+
+def test_transient_final_collection_failure_retries_without_losing_results(tmp_path):
+    class TransientOps(FakeOps):
+        def collect(self, *args):
+            self.collected += 1
+            if self.collected == 1:
+                raise OSError("temporary network loss")
+
+    ops = TransientOps()
+    result = invoke(tmp_path, FakeAPI(), ops)
+    assert result["collected"]
+    assert ops.collected == 2
+
+
+def test_restore_uploads_into_results_before_execution(tmp_path):
+    from transferlab.io import write_json
+
+    restore = tmp_path / "previous"
+    write_json(restore / "math/run.json", {"status": "failed"})
+    config = VastConfig()
+    ops = RemoteOps(config, tmp_path / "new")
+    ops.endpoint = ("example", 22)
+    calls = []
+    ops._rsync = lambda *args: calls.append(args)
+    ops.restore(restore, 123)
+    assert calls[0][0] == str(restore.resolve()) + "/"
+    assert calls[0][1].endswith(":/workspace/results/")
+    assert calls[0][2] == 123
+    order = []
+
+    class RestoringOps(FakeOps):
+        def upload(self, *args):
+            order.append("upload")
+
+        def restore(self, source, remaining):
+            assert source == restore
+            order.append("restore")
+
+        def execute(self, *args):
+            order.append("execute")
+
+    invoke(tmp_path, FakeAPI(), RestoringOps(), restore=restore)
+    assert order == ["upload", "restore", "execute"]
+
+
+def test_periodic_collection_failure_does_not_abort_remote_process(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+
+    class LocalOps(RemoteOps):
+        def _ssh(self):
+            return []
+
+        def collect(self, timeout):
+            raise OSError("temporary rsync failure")
+
+    original = subprocess.Popen
+    monkeypatch.setattr(
+        "transferlab.vast.subprocess.Popen",
+        lambda *args, **kwargs: original(
+            [sys.executable, "-c", "import time; print('working',flush=True); time.sleep(2.2)"],
+            **kwargs,
+        ),
+    )
+    ops = LocalOps(VastConfig(collection_seconds=1), tmp_path)
+    ops.execute(["ignored"], 10)
+    assert "working" in (tmp_path / "remote.log").read_text()
+    assert (tmp_path / "collection-errors.jsonl").exists()

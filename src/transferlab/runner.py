@@ -3,10 +3,19 @@ from __future__ import annotations
 from pathlib import Path
 
 from .backends import FixtureBackend, HFBackend
+from .checkpoints import checkpoint_paths, latest_checkpoint
 from .config import Benchmark, Experiment
 from .data import load_prepared
 from .evaluation import evaluate
-from .io import digest, environment, read_json, source_fingerprint, timestamp, write_json
+from .io import (
+    digest,
+    environment,
+    portable_provenance,
+    read_json,
+    source_fingerprint,
+    timestamp,
+    write_json,
+)
 from .sandbox import DockerSandbox, FixtureSandbox
 from .training import train
 
@@ -77,6 +86,11 @@ def run(
         "fixture": fixture,
         "pilot": pilot,
         "sandbox_image_ids": getattr(sandbox, "image_ids", {}),
+        "evaluation_tasks": {
+            k.removeprefix("eval-"): {t.id: digest(t.to_dict()) for t in ts}
+            for k, ts in splits.items()
+            if k.startswith("eval-")
+        },
     }
     fingerprint = digest(provenance)
     state_path = destination / "run.json"
@@ -84,7 +98,9 @@ def run(
         previous = read_json(state_path)
         if not resume:
             raise ValueError("Run already exists; use --resume or choose another output directory")
-        if previous["fingerprint"] != fingerprint:
+        if digest(previous["provenance"]) != previous["fingerprint"] or digest(
+            portable_provenance(previous["provenance"])
+        ) != digest(portable_provenance(provenance)):
             raise ValueError("Run resume requires identical code, environment, config, and data")
         if previous["status"] == "completed":
             return previous
@@ -117,11 +133,8 @@ def run(
                 )
             else:
                 completed_training = destination / "train" / "training.json"
-                checkpoints = sorted(
-                    (destination / "train").glob("checkpoint-*"),
-                    key=lambda p: int(p.name.split("-")[-1]),
-                )
-                checkpoint = checkpoints[-1] if resume and checkpoints else None
+                checkpoints = checkpoint_paths(destination / "train")
+                checkpoint = latest_checkpoint(destination / "train") if resume else None
                 if (
                     resume
                     and completed_training.exists()
@@ -129,6 +142,10 @@ def run(
                 ):
                     result = read_json(completed_training)
                 else:
+                    if resume and checkpoints and checkpoint is None:
+                        raise ValueError(
+                            "No verified complete recovery checkpoint; restore an earlier backup"
+                        )
                     result = train(
                         config, splits["train"], destination / "train", sandbox, checkpoint, pilot
                     )

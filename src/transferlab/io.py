@@ -22,6 +22,14 @@ def digest(value: Any) -> str:
     ).hexdigest()
 
 
+def portable_provenance(provenance: dict) -> dict:
+    """Host kernel identity changes across rentals; software and GPU requirements do not."""
+    return {
+        **provenance,
+        "environment": {k: v for k, v in provenance["environment"].items() if k != "platform"},
+    }
+
+
 def file_hash(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as f:

@@ -13,6 +13,8 @@ The default study starts each arm independently from Qwen2.5-7B-Instruct. The sm
 
 {{readiness_table}}
 
+The local and Docker stages also passed in [qualification CI](https://github.com/archiitectures/LLM-RLVR-Transfer-Learning/actions/runs/36969170305). The tiny CPU run had zero reward variation and zero gradient norm: it passed execution and resume checks, not a learning test. [Saved evidence summary](https://github.com/archiitectures/LLM-RLVR-Transfer-Learning/blob/master/docs/qualification.json) records the tested revision and counts.
+
 Passing a stage qualifies that stage only. The intended-model GPU pilot is required before funding the paper suite. A running training loop does not by itself demonstrate learning: useful GRPO updates require different rewards among responses to the same prompt.
 
 ### Who can use this

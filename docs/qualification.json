@@ -1,0 +1,11 @@
+{
+  "tested_commit": "9ca676c660515d05230f1c1c33d48d6aa37cab09",
+  "source_fingerprint": "5b7700d2294dc5dfa9a82201d026c7445a3da143459bbe212fc8a16292aed706",
+  "ci_run": "https://github.com/archiitectures/LLM-RLVR-Transfer-Learning/actions/runs/36969170305",
+  "local": {"status": "passed", "regression_tests": 64, "skipped": 0, "smoke_arms": 5},
+  "cpu": {"status": "passed", "training_steps": 1, "prediction_preserving_resume": true, "reward_variation": 0, "gradient_norm": 0, "learning_qualified": false},
+  "sandbox": {"status": "passed", "docker_tests": 7, "platform": "GitHub ubuntu-latest"},
+  "gpu": {"status": "not_executed", "reason": "No intended-model CUDA hardware provisioned; requires funded qualification"},
+  "rentals_created": 0,
+  "scope": "Initial execution qualification, not paper-study results or proof of useful training"
+}

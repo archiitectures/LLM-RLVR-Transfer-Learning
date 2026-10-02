@@ -1,0 +1,48 @@
+name: Initial qualification
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  local:
+    # macOS wheels avoid installing CUDA libraries for this CPU-only qualification.
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - run: uv sync --frozen --extra train --group dev
+      - run: uv run --frozen --extra train --group dev transferlab initial-tests --stage local --output runs/checks/local
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: local-qualification
+          path: runs/checks/local
+  sandbox:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v6
+      - run: uv sync --frozen --group dev
+      - run: docker pull python:3.11-slim
+      - run: docker build -f containers/sandbox.Dockerfile -t transferlab-sandbox:0.1.0 .
+      - run: uv run --frozen --group dev transferlab initial-tests --stage sandbox --output runs/checks/sandbox
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sandbox-qualification
+          path: runs/checks/sandbox

@@ -21,6 +21,38 @@ uv run --group dev pytest -q
 
 `smoke` exercises preparation, all five arm interfaces, baseline/final evaluation, saved predictions, and reporting without downloading models, executing generated code, or renting GPUs. Outputs are conspicuously marked **fixtures**. Scientific reports reject them unless `--allow-fixtures` is explicit.
 
+For the complete initial qualification workflow:
+
+```sh
+uv sync --frozen --extra train --group dev
+uv run --frozen --extra train --group dev transferlab initial-tests \
+  --stage local --output runs/checks/local
+uv run --frozen --extra train transferlab initial-tests \
+  --stage cpu --output runs/checks/cpu
+```
+
+`local` requires all regression/native training checks to run without skips, then executes the five-arm fixture suite. `cpu` downloads and runs the tiny real model and verifies that resume preserves predictions. Each stage writes `readiness.json` and logs; use a fresh output directory for each invocation. The subprocess deadline defaults to two hours and can be set with `--timeout`. Qualification never rents hardware.
+
+On a Docker host, after pulling/building the images below:
+
+```sh
+uv run --frozen --group dev transferlab initial-tests \
+  --stage sandbox --output runs/checks/sandbox
+```
+
+This opt-in stage checks real container isolation, time/output limits, and official EvalPlus correct/wrong/timeout cases. GitHub Actions also executes the local and Docker stages on each push/PR. CUDA qualification is explicit on the intended GPU runtime:
+
+```sh
+uv run --frozen --extra train --extra benchmarks --group dev transferlab \
+  initial-tests --stage gpu --prepared data/study/crypto data/study/benign_tools \
+  data/study/code data/study/math data/study/logic \
+  --output runs/checks/gpu --steps 2 --tasks 1
+```
+
+This checks each frozen runtime config and runs a small five-arm pilot. It qualifies execution on that GPU; a larger informative pilot and `pilot-budget` are still required before paper training. Commands assume a repository checkout; `--project` selects a different checkout root.
+
+The [PDF user guide](docs/TransferLab_User_Guide.pdf) explains capabilities, first tests, paper workflows, outputs and recovery. Its editable source is [docs/USER_GUIDE.md](docs/USER_GUIDE.md). Rebuild it with `uv run --group docs python scripts/build_user_report.py --evidence runs/checks/local/readiness.json --evidence runs/checks/cpu/readiness.json --evidence runs/checks/sandbox/readiness.json`.
+
 For a real small-model execution check:
 
 ```sh
@@ -57,6 +89,8 @@ uv run --extra benchmarks transferlab prepare configs/math.yaml \
 uv run --extra benchmarks transferlab prepare configs/logic.yaml \
   --output data/study/logic --shared-evaluation data/study/crypto
 ```
+
+The same five preparations can be performed with one resumable command: `uv run --frozen --extra train --extra benchmarks transferlab prepare-suite --output data/study`. Matching completed snapshots are verified and reused; a config/snapshot mismatch is rejected.
 
 Preparation resolves model/HF/GitHub references to commit SHAs, freezes tasks and official EvalPlus base/augmented inputs, computes typed oracles in Docker, and rejects normalized prompt overlaps across train/validation/evaluation. It never executes upstream generators, challenge setup commands, or reference solutions on the controller. Existing preparations are not overwritten. `--shared-evaluation` reuses exactly the same test snapshot and base-model revision; suites reject differing evaluation hashes.
 

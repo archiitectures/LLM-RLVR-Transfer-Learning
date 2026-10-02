@@ -17,6 +17,7 @@ vast = ["vastai>=0.2,<1"]
 
 [dependency-groups]
 dev = ["pytest>=8,<10", "ruff>=0.11,<1"]
+docs = ["reportlab>=4.4,<5", "pymupdf>=1.25,<2"]
 
 [project.scripts]
 transferlab = "transferlab.cli:main"
@@ -29,3 +30,4 @@ select = ["E4", "E7", "E9", "F", "I"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = ["sandbox: opt-in integration tests requiring Docker and both sandbox images"]

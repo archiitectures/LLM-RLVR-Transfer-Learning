@@ -32,6 +32,21 @@ def parser() -> argparse.ArgumentParser:
     prep.add_argument("--output", type=Path, required=True)
     prep.add_argument("--offline-fixture", action="store_true")
     prep.add_argument("--shared-evaluation", type=Path)
+    suite_prep = sub.add_parser(
+        "prepare-suite", help="Prepare all five arms with one shared evaluation snapshot"
+    )
+    suite_prep.add_argument("--project", type=Path, default=Path.cwd())
+    suite_prep.add_argument("--output", type=Path, required=True)
+    qualification = sub.add_parser(
+        "initial-tests", help="Run bounded local, CPU, Docker or prepared GPU qualification"
+    )
+    qualification.add_argument("--stage", choices=["local", "cpu", "sandbox", "gpu"], required=True)
+    qualification.add_argument("--project", type=Path, default=Path.cwd())
+    qualification.add_argument("--output", type=Path, required=True)
+    qualification.add_argument("--prepared", type=Path, nargs="+")
+    qualification.add_argument("--timeout", type=int, default=7200)
+    qualification.add_argument("--steps", type=int, default=2)
+    qualification.add_argument("--tasks", type=int, default=1)
     smoke = sub.add_parser(
         "smoke", help="Exercise all five arms without downloads, Docker, or training"
     )
@@ -136,6 +151,24 @@ def main(argv: list[str] | None = None) -> int:
                 offline=args.offline_fixture,
                 shared_evaluation=args.shared_evaluation,
             )
+        elif args.command == "prepare-suite":
+            from .initial_tests import prepare_suite
+
+            result = prepare_suite(args.project, args.output)
+        elif args.command == "initial-tests":
+            from .initial_tests import initial_tests
+
+            result = initial_tests(
+                args.stage,
+                args.project,
+                args.output,
+                prepared=args.prepared,
+                timeout=args.timeout,
+                steps=args.steps,
+                tasks=args.tasks,
+            )
+            print(json.dumps(result, indent=2, sort_keys=True))
+            return 0 if result["status"] == "passed" else 1
         elif args.command == "smoke":
             from .config import DataSource
 
